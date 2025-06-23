@@ -693,7 +693,27 @@
             <div class="room-header">
                 <h1>🎤 Host Dashboard</h1>
                 <div>Room Code: <span id="host-room-code" class="room-code">-----</span></div>
-                <button class="btn" onclick="copyRoomCode()" style="margin-top: 15px; width: auto; padding: 10px 20px;">📋 Copy Code</button>
+                
+                <!-- Enhanced sharing options -->
+                <div class="sharing-options" style="margin-top: 15px; display: flex; gap: 10px; justify-content: center; flex-wrap: wrap;">
+                    <button class="btn" onclick="copyRoomCode()" style="width: auto; padding: 10px 15px; font-size: 0.9rem;">
+                        📋 Copy Code
+                    </button>
+                    
+                    <button class="btn" onclick="shareRoom()" style="width: auto; padding: 10px 15px; font-size: 0.9rem; background: linear-gradient(45deg, #9b59b6, #8e44ad);">
+                        📱 Share Room
+                    </button>
+                    
+                    <button class="btn" onclick="shareLink()" style="width: auto; padding: 10px 15px; font-size: 0.9rem; background: linear-gradient(45deg, #3498db, #2980b9);">
+                        🔗 Share Link
+                    </button>
+                </div>
+                
+                <!-- Room link display -->
+                <div id="room-link-display" style="margin-top: 15px; padding: 10px; background: rgba(255,255,255,0.1); border-radius: 10px; font-size: 0.9rem; display: none;">
+                    <div>Share this link:</div>
+                    <div id="room-link" style="word-break: break-all; margin-top: 5px; font-family: monospace;"></div>
+                </div>
             </div>
 
             <div class="settings-section">
@@ -1564,6 +1584,333 @@
             
             // Cleanup YouTube players
             cleanupYouTubePlayers();
+        }
+
+        // Connection state management
+        let connectionState = {
+            isConnected: true,
+            reconnectAttempts: 0,
+            maxReconnectAttempts: 5,
+            roomCode: null,
+            playerRole: null,
+            playerName: null
+        };
+
+        // Enhanced socket setup with reconnection
+        function setupSocketEvents() {
+            // Store connection info for reconnection
+            APP_STATE.socket.on('room_created', (data) => {
+                if (data.success) {
+                    connectionState.roomCode = data.roomCode;
+                    connectionState.playerRole = 'host';
+                    connectionState.playerName = document.getElementById('host-name').value;
+                    
+                    APP_STATE.player = { role: 'host', name: connectionState.playerName };
+                    setState('host');
+                    document.getElementById('host-room-code').textContent = data.roomCode;
+                    APP_STATE.socket.emit('get_room_state');
+                    showNotification('Room created successfully!');
+                }
+            });
+
+            APP_STATE.socket.on('room_joined', (data) => {
+                if (data.success) {
+                    connectionState.roomCode = data.roomCode;
+                    connectionState.playerRole = 'player';
+                    connectionState.playerName = document.getElementById('player-name').value;
+                    
+                    APP_STATE.player = { role: 'player', name: connectionState.playerName };
+                    setState('player');
+                    document.getElementById('player-room-code').textContent = data.roomCode;
+                    APP_STATE.socket.emit('get_room_state');
+                    showNotification('Joined room successfully!');
+                }
+            });
+
+            // Handle disconnection
+            APP_STATE.socket.on('disconnect', (reason) => {
+                console.log('Disconnected:', reason);
+                connectionState.isConnected = false;
+                
+                // Show reconnection message
+                showNotification('Connection lost. Attempting to reconnect...', 'error');
+                
+                // Don't auto-reconnect if it was intentional
+                if (reason !== 'io client disconnect') {
+                    attemptReconnection();
+                }
+            });
+
+            // Handle successful reconnection
+            APP_STATE.socket.on('connect', () => {
+                console.log('Connected/Reconnected');
+                connectionState.isConnected = true;
+                connectionState.reconnectAttempts = 0;
+                
+                // If we were in a room, rejoin it
+                if (connectionState.roomCode && connectionState.playerRole) {
+                    rejoinRoom();
+                }
+                
+                showNotification('Connected!', 'success');
+            });
+
+            // Rest of your existing socket events...
+            APP_STATE.socket.on('join_failed', (data) => {
+                showNotification(data.error, 'error');
+            });
+
+            APP_STATE.socket.on('room_state', (data) => {
+                if (data.error) {
+                    showNotification(data.error, 'error');
+                    setState('landing');
+                    return;
+                }
+                
+                APP_STATE.room = data.room;
+                APP_STATE.yourRole = data.yourRole;
+                APP_STATE.yourName = data.yourName;
+                updateGameState();
+            });
+
+            APP_STATE.socket.on('room_updated', (data) => {
+                APP_STATE.room = data.room;
+                updateGameState();
+            });
+
+            APP_STATE.socket.on('room_closed', (data) => {
+                showNotification(data.message, 'error');
+                setState('landing');
+                connectionState = { isConnected: true, reconnectAttempts: 0, maxReconnectAttempts: 5, roomCode: null, playerRole: null, playerName: null };
+            });
+
+            APP_STATE.socket.on('error', (data) => {
+                showNotification(data.message, 'error');
+            });
+        }
+
+        // Attempt to reconnect to the room
+        function attemptReconnection() {
+            if (connectionState.reconnectAttempts >= connectionState.maxReconnectAttempts) {
+                showNotification('Unable to reconnect. Please refresh the page.', 'error');
+                return;
+            }
+            
+            connectionState.reconnectAttempts++;
+            
+            setTimeout(() => {
+                if (!connectionState.isConnected) {
+                    console.log(`Reconnection attempt ${connectionState.reconnectAttempts}`);
+                    APP_STATE.socket.connect();
+                }
+            }, 2000 * connectionState.reconnectAttempts); // Exponential backoff
+        }
+
+        // Rejoin room after reconnection
+        function rejoinRoom() {
+            if (connectionState.playerRole === 'host') {
+                // Host should recreate room or get room state
+                APP_STATE.socket.emit('get_room_state');
+            } else if (connectionState.playerRole === 'player') {
+                // Player should rejoin
+                APP_STATE.socket.emit('join_room', {
+                    roomCode: connectionState.roomCode,
+                    playerName: connectionState.playerName
+                });
+            }
+        }
+
+        // Detect when page becomes visible again (user returns to app)
+        document.addEventListener('visibilitychange', () => {
+            if (!document.hidden) {
+                // Page became visible again
+                console.log('Page became visible');
+                
+                // Check connection status
+                if (!APP_STATE.socket.connected && connectionState.roomCode) {
+                    showNotification('Reconnecting...', 'info');
+                    APP_STATE.socket.connect();
+                }
+            }
+        });
+
+        // Detect when app comes back into focus
+        window.addEventListener('focus', () => {
+            console.log('Window focused');
+            
+            // Double-check connection when window gets focus
+            if (!APP_STATE.socket.connected && connectionState.roomCode) {
+                showNotification('Reconnecting...', 'info');
+                APP_STATE.socket.connect();
+            }
+        });
+
+        // Enhanced notification system with different types
+        function showNotification(message, type = 'success') {
+            // Remove existing notifications
+            const existingNotifications = document.querySelectorAll('.notification');
+            existingNotifications.forEach(notif => notif.remove());
+            
+            const notification = document.createElement('div');
+            notification.className = `notification ${type}`;
+            
+            // Different icons for different types
+            const icons = {
+                success: '✅',
+                error: '❌',
+                info: 'ℹ️',
+                warning: '⚠️'
+            };
+            
+            notification.innerHTML = `${icons[type] || icons.success} ${message}`;
+            document.body.appendChild(notification);
+            
+            // Auto-remove after 4 seconds (longer for errors)
+            const duration = type === 'error' ? 6000 : 4000;
+            setTimeout(() => {
+                if (notification.parentNode) {
+                    notification.style.opacity = '0';
+                    setTimeout(() => {
+                        if (notification.parentNode) {
+                            document.body.removeChild(notification);
+                        }
+                    }, 300);
+                }
+            }, duration);
+        }
+
+        // Connection status indicator (optional - shows current connection state)
+        function createConnectionIndicator() {
+            const indicator = document.createElement('div');
+            indicator.id = 'connection-indicator';
+            indicator.style.cssText = `
+                position: fixed;
+                top: 10px;
+                left: 10px;
+                padding: 5px 10px;
+                border-radius: 15px;
+                font-size: 12px;
+                font-weight: bold;
+                z-index: 1001;
+                transition: all 0.3s;
+            `;
+            
+            function updateIndicator() {
+                if (APP_STATE.socket.connected) {
+                    indicator.textContent = '🟢 Connected';
+                    indicator.style.background = 'rgba(46, 204, 113, 0.9)';
+                    indicator.style.color = 'white';
+                } else {
+                    indicator.textContent = '🔴 Reconnecting...';
+                    indicator.style.background = 'rgba(231, 76, 60, 0.9)';
+                    indicator.style.color = 'white';
+                }
+            }
+            
+            // Update indicator when connection changes
+            APP_STATE.socket.on('connect', updateIndicator);
+            APP_STATE.socket.on('disconnect', updateIndicator);
+            
+            updateIndicator();
+            document.body.appendChild(indicator);
+            
+            // Hide indicator after 3 seconds if connected
+            setTimeout(() => {
+                if (APP_STATE.socket.connected) {
+                    indicator.style.opacity = '0';
+                }
+            }, 3000);
+        }
+
+        async function shareRoom() {
+            const roomCode = document.getElementById('host-room-code').textContent;
+            const shareText = `Join my Song Wars battle! 🎵\nRoom Code: ${roomCode}\nPlay at: ${window.location.origin}`;
+            
+            // Use native sharing if available (mobile)
+            if (navigator.share) {
+                try {
+                    await navigator.share({
+                        title: 'Song Wars Battle',
+                        text: shareText,
+                        url: `${window.location.origin}?room=${roomCode}`
+                    });
+                    showNotification('Shared successfully!');
+                } catch (error) {
+                    if (error.name !== 'AbortError') {
+                        console.log('Share failed, falling back to copy');
+                        fallbackShare(shareText);
+                    }
+                }
+            } else {
+                // Fallback for desktop
+                fallbackShare(shareText);
+            }
+        }
+
+        async function shareLink() {
+            const roomCode = document.getElementById('host-room-code').textContent;
+            const roomLink = `${window.location.origin}?room=${roomCode}`;
+            
+            // Show the link
+            document.getElementById('room-link').textContent = roomLink;
+            document.getElementById('room-link-display').style.display = 'block';
+            
+            // Use native sharing if available
+            if (navigator.share) {
+                try {
+                    await navigator.share({
+                        title: 'Song Wars Battle',
+                        text: 'Join my Song Wars battle! 🎵',
+                        url: roomLink
+                    });
+                    showNotification('Link shared!');
+                } catch (error) {
+                    if (error.name !== 'AbortError') {
+                        copyToClipboard(roomLink);
+                    }
+                }
+            } else {
+                copyToClipboard(roomLink);
+            }
+        }
+
+        function fallbackShare(text) {
+            copyToClipboard(text);
+            showNotification('Room details copied to clipboard!');
+        }
+
+        async function copyToClipboard(text) {
+            try {
+                await navigator.clipboard.writeText(text);
+                showNotification('Copied to clipboard!');
+            } catch (error) {
+                // Fallback for older browsers
+                const textArea = document.createElement('textarea');
+                textArea.value = text;
+                document.body.appendChild(textArea);
+                textArea.select();
+                document.execCommand('copy');
+                document.body.removeChild(textArea);
+                showNotification('Copied to clipboard!');
+            }
+        }
+
+        // Auto-join room from URL parameter
+        document.addEventListener('DOMContentLoaded', () => {
+            const urlParams = new URLSearchParams(window.location.search);
+            const roomCode = urlParams.get('room');
+            
+            if (roomCode) {
+                // Pre-fill the room code
+                document.getElementById('room-code').value = roomCode;
+                showNotification(`Room code ${roomCode} auto-filled!`, 'info');
+            }
+        });
+
+        // Update the existing copyRoomCode function
+        function copyRoomCode() {
+            const roomCode = document.getElementById('host-room-code').textContent;
+            copyToClipboard(roomCode);
         }
     </script>
 </body>
